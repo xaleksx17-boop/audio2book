@@ -18,9 +18,9 @@ jobs:
   build:
     runs-on: windows-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@v6
         with:
           python-version: "3.12"
           cache: pip
@@ -80,7 +80,7 @@ jobs:
           & "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe" /DMyAppVersion=${{ steps.ver.outputs.version }} packaging\installer.iss
           Compress-Archive dist\Audio2Book\* dist\Audio2Book-${{ steps.ver.outputs.version }}-portable.zip
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v6
         with:
           name: Audio2Book-${{ steps.ver.outputs.version }}
           path: |
@@ -100,7 +100,7 @@ jobs:
           ls -la cudapack/cuda
           cd cudapack && 7z a -tzip -mx=5 ../dist/Audio2Book-CUDA-pack.zip cuda
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v6
         if: steps.cuda.outcome == 'success'
         with:
           name: Audio2Book-CUDA-pack
@@ -109,7 +109,7 @@ jobs:
 
       - name: Релиз
         if: startsWith(github.ref, 'refs/tags/v') || github.event.inputs.release_version != ''
-        uses: softprops/action-gh-release@v2
+        uses: softprops/action-gh-release@v3
         with:
           tag_name: v${{ steps.ver.outputs.version }}
           name: Audio2Book ${{ steps.ver.outputs.version }}
