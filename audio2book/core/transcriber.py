@@ -74,6 +74,36 @@ def _nvidia_driver_present() -> bool:
     return os.path.isfile(os.path.join(sysroot, "System32", "nvcuda.dll"))
 
 
+MIN_DRIVER = (528, 0)   # CUDA 12.x на Windows
+
+
+def _ver_tuple(v: str) -> Tuple[int, ...]:
+    try:
+        return tuple(int(x) for x in v.split(".")[:2])
+    except ValueError:
+        return (0,)
+
+
+def nvidia_driver_info() -> Tuple[str, str]:
+    """(название видеокарты, версия драйвера) через nvidia-smi; пустые строки, если не удалось."""
+    if sys.platform != "win32":
+        return "", ""
+    import subprocess
+    sysroot = os.environ.get("SystemRoot", r"C:\Windows")
+    for exe in (os.path.join(sysroot, "System32", "nvidia-smi.exe"),
+                r"C:\Program Files\NVIDIA Corporation\NVSMI\nvidia-smi.exe", "nvidia-smi"):
+        try:
+            r = subprocess.run([exe, "--query-gpu=name,driver_version", "--format=csv,noheader"],
+                               capture_output=True, text=True, timeout=8, creationflags=0x08000000)
+        except (OSError, subprocess.SubprocessError):
+            continue
+        line = (r.stdout or "").strip().splitlines()
+        if r.returncode == 0 and line and "," in line[0]:
+            name, ver = (x.strip() for x in line[0].rsplit(",", 1))
+            return name, ver
+    return "", ""
+
+
 def gpu_status() -> Tuple[bool, str]:
     """(видеокарта готова, понятное сообщение для строки состояния)."""
     if cuda_available():
@@ -85,8 +115,13 @@ def gpu_status() -> Tuple[bool, str]:
         if not os.path.isdir(os.path.join(base, "cuda")):
             return False, ("Видеокарта NVIDIA есть, но нет CUDA-пакета — распознавание на процессоре. "
                            f"Распакуйте Audio2Book-CUDA-pack.zip: папку cuda — в {base}")
-        return False, ("CUDA-пакет на месте, но видеокарта не запустилась — обновите драйвер NVIDIA. "
-                       "Пока распознавание на процессоре")
+        name, ver = nvidia_driver_info()
+        if ver and _ver_tuple(ver) < MIN_DRIVER:
+            return False, (f"Драйвер NVIDIA {ver} слишком старый для {name or 'видеокарты'} — нужен 528 или новее "
+                           "(nvidia.com → Драйверы). Пока распознавание на процессоре")
+        return False, ("CUDA-пакет на месте, но видеокарта не запустилась"
+                       + (f" (драйвер {ver})" if ver else "")
+                       + " — переустановите драйвер NVIDIA с nvidia.com. Пока распознавание на процессоре")
     return False, "Видеокарта NVIDIA не найдена — распознавание на процессоре (медленнее)"
 
 
