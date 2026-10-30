@@ -34,7 +34,7 @@
 
 1. Скачайте `Audio2Book-Setup-x.y.z.exe` из Releases (или из Actions → последняя сборка → Artifacts) и установите.
 2. **Видеокарта NVIDIA (необязательно, но в 10–20 раз быстрее):** скачайте `Audio2Book-CUDA-pack.zip`
-   и распакуйте папку `cuda` в папку программы (`C:\Program Files\Audio2Book\cuda`). Нужен драйвер NVIDIA 525 или новее.
+   и распакуйте папку `cuda` в папку программы (`C:\Program Files\Audio2Book\cuda`). Нужен драйвер NVIDIA 528 или новее (проверить: команда `nvidia-smi`).
    Программа сама определит видеокарту; если что-то не так — тихо перейдёт на процессор.
 3. При первом запуске книги скачается модель (~1,6 ГБ для large-v3-turbo) в `%LOCALAPPDATA%\Audio2Book\models`.
    Если huggingface.co не открывается — в «Настройках» укажите сервер `https://hf-mirror.com`,
