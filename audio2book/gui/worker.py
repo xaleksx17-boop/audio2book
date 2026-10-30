@@ -61,6 +61,16 @@ class Worker(QObject):
             self._tr_key = key
         return self._tr
 
+    def _translator(self, s: Settings):
+        from ..core.translate import make_translator
+        key = (s.tr_engine, s.tr_offline_model, s.tr_device, s.models_dir, s.deepseek_key, s.deepseek_model,
+               s.gigachat_key, s.gigachat_scope, s.gigachat_model, s.yandex_key, s.yandex_folder, s.yandex_model,
+               s.claude_key, s.claude_model, s.openai_base, s.openai_key, s.openai_model)
+        if getattr(self, "_trl_key", None) != key:
+            self._trl = make_translator(s, self.log.emit)
+            self._trl_key = key
+        return self._trl
+
     @Slot(object, object)
     def run(self, job: Job, settings: Settings) -> None:
         self.stop_ev.clear()
@@ -88,18 +98,15 @@ class Worker(QObject):
                 if worker.stop_ev.is_set():
                     raise Cancelled()
 
+            def book_ready(self, book):
+                worker.job_info.emit(job.id, book.title, book.author, len(book.chapters), book.duration,
+                                     job.project_path)
+
         _keep_awake(settings.keep_awake)
         settings.apply_env()
         try:
-            cb = CB()
-            book = pipeline.prepare_project(job, settings, cb)
-            self.job_info.emit(job.id, book.title, book.author, len(book.chapters), book.duration, job.project_path)
-            if book.chapters and not book.done:
-                cb.check()
-                pipeline.transcribe_book(job, book, settings, self._transcriber(settings), cb)
-            from ..export import export_book
-            import os
-            export_book(book, os.path.dirname(job.project_path), job.formats or settings.formats, settings, cb.log)
+            pipeline.run_job(job, settings, self._transcriber(settings), CB(),
+                             make_translator=lambda: self._translator(settings))
             self.progress.emit(job.id, 1.0, "")
             self.finished.emit(job.id, pipeline.STATUS_DONE, "")
         except Cancelled:

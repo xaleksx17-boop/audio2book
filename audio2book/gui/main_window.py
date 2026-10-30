@@ -19,6 +19,7 @@ from ..core.pipeline import (STATUS_DONE, STATUS_ERR, STATUS_PAUSE, STATUS_RUN, 
 from ..core.project import PROJECT_EXT, Book
 from ..core.settings import APP_TITLE, APP_VERSION, FORMATS, Settings, config_dir
 from ..core.transcriber import MODELS, gpu_status
+from ..core.translate import ENGINE_NAME, LANG_NAME, LANGS
 from .worker import Worker
 
 COL_TITLE, COL_AUTHOR, COL_CH, COL_DUR, COL_STATUS, COL_PROG, COL_INFO = range(7)
@@ -125,6 +126,24 @@ class MainWindow(QMainWindow):
         self.model_cb.currentIndexChanged.connect(self._model_changed)
         row.addWidget(self.model_cb)
         row.addSpacing(20)
+        row.addWidget(QLabel("Перевод на:"))
+        self.tr_cb = QComboBox()
+        self.tr_cb.addItem("без перевода", "")
+        for code, name, _ in LANGS:
+            self.tr_cb.addItem(name, code)
+        self.tr_cb.setCurrentIndex(max(0, self.tr_cb.findData(self.settings.translate_to)))
+        self.tr_cb.setToolTip("Переведённая книга сохраняется рядом с оригиналом с пометкой [язык]")
+        self.tr_cb.currentIndexChanged.connect(self._translate_changed)
+        row.addWidget(self.tr_cb)
+        self.tr_lbl = QLabel()
+        self.tr_lbl.setTextFormat(Qt.RichText)
+        self.tr_lbl.linkActivated.connect(lambda _: self.open_settings(tab=2))
+        row.addWidget(self.tr_lbl)
+        row.addStretch(1)
+        lay.addLayout(row)
+        self._update_tr_label()
+
+        row = QHBoxLayout()
         row.addWidget(QLabel("Форматы:"))
         self.fmt_boxes = {}
         for key, text in FORMATS:
@@ -353,6 +372,7 @@ class MainWindow(QMainWindow):
         job = pending[0]
         job.status, job.message = STATUS_RUN, ""
         job.formats = [k for k, cb in self.fmt_boxes.items() if cb.isChecked()] or job.formats
+        job.translate_to = self.settings.translate_to
         if job.project_path and job.project_path in self.editors:
             ed = self.editors[job.project_path]
             if ed.isVisible() and not ed.maybe_save():
@@ -483,6 +503,37 @@ class MainWindow(QMainWindow):
         self.settings.model = self.model_cb.currentData()
         self.settings.save()
 
+    def _translate_changed(self):
+        self.settings.translate_to = self.tr_cb.currentData()
+        self.settings.save()
+        self._update_tr_label()
+
+    def _update_tr_label(self):
+        if not self.settings.translate_to:
+            self.tr_lbl.setText("")
+            return
+        name = ENGINE_NAME.get(self.settings.tr_engine, self.settings.tr_engine).split(" (")[0].split(" — ")[0]
+        self.tr_lbl.setText(f'через <a href="settings">{name}</a>')
+        self.tr_lbl.setToolTip("Способ перевода и ключи API — в настройках, вкладка «Перевод»")
+
+    def translate_selected(self):
+        tgt = self.settings.translate_to
+        if not tgt:
+            QMessageBox.information(self, "Перевод", "Выберите язык в списке «Перевод на:» над очередью.")
+            self.tr_cb.setFocus()
+            self.tr_cb.showPopup()
+            return
+        for job in self.selected_jobs():
+            if job is self.running:
+                continue
+            job.translate_to = tgt
+            job.formats = [k for k, cb in self.fmt_boxes.items() if cb.isChecked()] or job.formats
+            job.status, job.message, job.progress = STATUS_WAIT, "", 0.0
+            self._refresh_row(job)
+        self.save_queue()
+        if not self.running:
+            self.start()
+
     def _formats_changed(self):
         self.settings.formats = [k for k, cb in self.fmt_boxes.items() if cb.isChecked()]
         self.settings.save()
@@ -502,6 +553,9 @@ class MainWindow(QMainWindow):
         m.addAction("Открыть в редакторе", self.open_editor).setEnabled(has_proj)
         m.addAction("Открыть папку книги", self.open_folder).setEnabled(has_proj)
         m.addAction("Экспортировать заново", self.reexport).setEnabled(has_proj and job is not self.running)
+        lang = LANG_NAME.get(self.settings.translate_to, "")
+        m.addAction(f"Перевести на {lang.lower()}" if lang else "Перевести…",
+                    self.translate_selected).setEnabled(job is not self.running)
         m.addSeparator()
         m.addAction("Распознать заново (с нуля)", self.restart_job).setEnabled(job is not self.running)
         m.addAction("Убрать из очереди", self.remove_selected).setEnabled(job is not self.running)
@@ -537,12 +591,12 @@ class MainWindow(QMainWindow):
         self.save_queue()
 
     def reexport(self):
-        from ..export import export_book
+        from ..core.pipeline import export_all
         job = self.selected_jobs()[0]
         book = Book.load(job.project_path)
         fmts = [k for k, cb in self.fmt_boxes.items() if cb.isChecked()]
         self.append_log(f"\n=== Экспорт: {book.title} ===")
-        export_book(book, os.path.dirname(job.project_path), fmts, self.settings, self.append_log)
+        export_all(book, os.path.dirname(job.project_path), fmts, self.settings, self.append_log)
 
     def restart_job(self):
         job = self.selected_jobs()[0]
@@ -559,12 +613,14 @@ class MainWindow(QMainWindow):
         self._refresh_row(job)
         self.save_queue()
 
-    def open_settings(self):
+    def open_settings(self, tab: int = 0):
         from .settings_dialog import SettingsDialog
         dlg = SettingsDialog(self.settings, self)
+        dlg.tabs.setCurrentIndex(tab if isinstance(tab, int) else 0)
         if dlg.exec():
             self.settings.save()
             self.settings.apply_env()
+            self._update_tr_label()
             i = self.model_cb.findData(self.settings.model)
             if i < 0:
                 self.model_cb.addItem(os.path.basename(self.settings.model) + " (своя)", self.settings.model)

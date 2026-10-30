@@ -46,10 +46,10 @@ def write_azw3(epub_path: str, path: str, calibre: Optional[str]) -> str:
 
 
 def export_book(book: Book, folder: str, formats: List[str], settings: Settings,
-                log: Callable[[str], None] = print) -> List[str]:
-    from ..core.pipeline import book_basename
+                log: Callable[[str], None] = print, suffix: str = "") -> List[str]:
+    from ..core.pipeline import book_basename, safe_filename
     os.makedirs(folder, exist_ok=True)
-    base = book_basename(book)
+    base = safe_filename(book_basename(book) + suffix)
     titles = settings.chapter_titles_in_text
     out: List[str] = []
     epub_path = os.path.join(folder, base + ".epub")

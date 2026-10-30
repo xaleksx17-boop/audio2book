@@ -11,7 +11,8 @@ from typing import Callable, List, Optional
 from . import audio
 from .project import PROJECT_EXT, Book, Segment
 from .settings import Settings
-from .textproc import is_garbage, postprocess
+from .textproc import clean_text, is_garbage, postprocess
+from .translate import parse_glossary
 from .transcriber import Cancelled, Transcriber
 
 STATUS_WAIT = "В очереди"
@@ -35,6 +36,7 @@ class Job:
     duration: float = 0.0
     chapters: int = 0
     message: str = ""
+    translate_to: str = ""          # язык перевода для этой книги ("" — без перевода)
     id: str = field(default_factory=lambda: uuid.uuid4().hex[:10])
 
     def to_dict(self):
@@ -75,6 +77,9 @@ class Callbacks:
 
     def partial(self, text: str) -> None:
         """Только что распознанный фрагмент (для живого просмотра)."""
+
+    def book_ready(self, book: Book) -> None:
+        """Проект открыт/создан: название, автор, главы известны."""
 
 
 def prepare_project(job: Job, settings: Settings, cb: Callbacks) -> Book:
@@ -141,7 +146,7 @@ def transcribe_book(job: Job, book: Book, settings: Settings, tr: Transcriber, c
                     left = (total - processed) / speed
                     info = f"×{speed:.1f}, осталось ~{audio.fmt_duration(left)}"
                 cb.progress(frac, info)
-                if not is_garbage(text):
+                if not is_garbage(clean_text(text)):
                     cb.partial(text)
 
             raw = tr.transcribe(samples, language=settings.language, beam_size=settings.beam_size,
@@ -153,24 +158,89 @@ def transcribe_book(job: Job, book: Book, settings: Settings, tr: Transcriber, c
 
         ch.segments = postprocess(ch.segments, settings.pause_para, settings.max_sentences)
         ch.done, ch.resume_at = True, None
+        detected = getattr(tr, "last_language", None)
+        if settings.language == "auto" and detected:
+            book.language = detected
         book.save(job.project_path)
         cb.progress(min(book.processed_seconds() / total, 0.999), "")
 
 
-def run_job(job: Job, settings: Settings, tr: Transcriber, cb: Callbacks) -> Book:
+def translate_book(job: Job, book: Book, settings: Settings, translator, cb: Callbacks) -> None:
+    """Перевод по главам. Готовые главы (переведённые с текущего текста) пропускаются,
+    поэтому после остановки перевод продолжается с той же главы."""
+    tgt = job.translate_to
+    src = book.language or "ru"
+    if not tgt or tgt == src:
+        return
+    if book.tr_lang != tgt:                       # другой язык — начинаем перевод заново
+        for ch in book.chapters:
+            ch.tr_title, ch.tr_paras, ch.tr_src = "", [], []
+        book.tr_title = ""
+    book.tr_lang, book.tr_engine = tgt, settings.tr_engine
+    glossary = parse_glossary(settings.tr_glossary)
+    translator.title, translator.author = book.title, book.author
+    todo = [c for c in book.chapters if c.text_paragraphs() and not c.translation_current()]
+    if not todo and book.tr_title:
+        return
+    from .translate import ENGINE_NAME, LANG_NAME
+    total = sum(len(" ".join(c.text_paragraphs())) for c in todo) or 1
+    cb.log(f"Перевод на {LANG_NAME.get(tgt, tgt).lower()}: {ENGINE_NAME.get(settings.tr_engine, settings.tr_engine)}, "
+           f"глав: {len(todo)}")
+    if not book.tr_title:
+        book.tr_title = translator.translate([book.title], src, tgt, cb.check, glossary)[0] or book.title
+        book.save(job.project_path)
+    done, t0 = 0, time.monotonic()
+    for i, ch in enumerate(todo, 1):
+        cb.check()
+        paras = ch.text_paragraphs()
+        cb.log(f"  перевод [{i}/{len(todo)}] {ch.title}")
+        res = translator.translate([ch.title] + paras, src, tgt, cb.check, glossary)
+        ch.tr_title, ch.tr_paras, ch.tr_src = res[0] or ch.title, res[1:], paras
+        book.save(job.project_path)
+        if ch.tr_paras:
+            cb.partial(ch.tr_title + "\n" + ch.tr_paras[0][:300] + ("…" if len(ch.tr_paras[0]) > 300 else ""))
+        done += len(" ".join(paras))
+        el = time.monotonic() - t0
+        info = f"перевод, осталось ~{audio.fmt_duration(el / done * (total - done))}" if el > 5 else "перевод"
+        cb.progress(min(done / total, 0.999), info)
+
+
+def export_all(book: Book, folder: str, formats, settings: Settings, log) -> None:
     from ..export import export_book
+    export_book(book, folder, formats, settings, log)
+    if book.tr_lang and all(c.tr_paras or not c.text_paragraphs() for c in book.chapters):
+        fmts = [f for f in formats if f not in ("srt", "lrc")]   # таймкоды есть только у оригинала
+        if fmts:
+            log(f"Перевод ({book.tr_lang}):")
+            stale = [c.title for c in book.chapters if c.tr_paras and not c.translation_current()]
+            if stale:
+                log(f"  ! оригинал правили после перевода, перевод устарел в главах: {', '.join(stale[:5])}"
+                    + ("…" if len(stale) > 5 else "") + " — меню книги → «Перевести»")
+            export_book(book.translated_copy(), folder, fmts, settings, log, suffix=f" [{book.tr_lang}]")
+
+
+def run_job(job: Job, settings: Settings, tr: Transcriber, cb: Callbacks, make_translator=None) -> Book:
+    """Всё задание целиком: проект → распознавание → перевод (если выбран) → экспорт.
+    make_translator — функция, создающая переводчик (вызывается, только если перевод нужен)."""
     book = prepare_project(job, settings, cb)
     job.duration, job.chapters = book.duration, len(book.chapters)
     if not job.title:
         job.title = book.title
     if not job.author:
         job.author = book.author
-    transcribe_book(job, book, settings, tr, cb)
-    folder = os.path.dirname(job.project_path)
-    export_book(book, folder, job.formats or settings.formats, settings, cb.log)
+    cb.book_ready(book)
+    if not book.done:
+        cb.check()
+        transcribe_book(job, book, settings, tr, cb)
+    if job.translate_to and job.translate_to != book.language:
+        if make_translator is None:
+            from .translate import make_translator as mk
+            make_translator = lambda: mk(settings, cb.log)  # noqa: E731
+        translate_book(job, book, settings, make_translator(), cb)
+    export_all(book, os.path.dirname(job.project_path), job.formats or settings.formats, settings, cb.log)
     cb.progress(1.0, "")
     return book
 
 
 __all__ = ["Job", "Callbacks", "Cancelled", "run_job", "prepare_project", "transcribe_book",
-           "book_basename", "safe_filename"]
+           "translate_book", "export_all", "book_basename", "safe_filename"]

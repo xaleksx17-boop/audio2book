@@ -142,6 +142,7 @@ class Transcriber:
         self._model = None
         self.device = None
         self.compute_type = None
+        self.last_language: Optional[str] = None
 
     # --- загрузка ---------------------------------------------------------
     def _choose(self) -> Tuple[str, str]:
@@ -213,7 +214,7 @@ class Transcriber:
     def _run(self, audio, language, beam_size, initial_prompt, vad, on_segment, check) -> List[RawSegment]:
         lang = None if language in (None, "", "auto") else language
         prompt = initial_prompt if initial_prompt is not None else DEFAULT_PROMPT.get(lang or "", None)
-        segments, _info = self._model.transcribe(
+        segments, info = self._model.transcribe(
             audio,
             language=lang,
             beam_size=beam_size,
@@ -225,6 +226,7 @@ class Transcriber:
             compression_ratio_threshold=2.4,
             no_speech_threshold=0.6,
         )
+        self.last_language = getattr(info, "language", None) or self.last_language
         out: List[RawSegment] = []
         for seg in segments:          # генератор: распознавание идёт по мере чтения
             if check:

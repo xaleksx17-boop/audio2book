@@ -94,6 +94,53 @@ class SegmentModel(QAbstractTableModel):
                 self.dataChanged.emit(self.index(r, 0), self.index(r, 2))
 
 
+class TranslationModel(QAbstractTableModel):
+    edited = Signal()
+
+    def __init__(self):
+        super().__init__()
+        self.ch: Chapter | None = None
+
+    def set_chapter(self, ch):
+        self.beginResetModel()
+        self.ch = ch
+        self.endResetModel()
+
+    def rowCount(self, parent=QModelIndex()):
+        return 0 if parent.isValid() or not self.ch else len(self.ch.tr_paras)
+
+    def columnCount(self, parent=QModelIndex()):
+        return 2
+
+    def headerData(self, s, o, role=Qt.DisplayRole):
+        if o == Qt.Horizontal and role == Qt.DisplayRole:
+            return ("Оригинал", "Перевод (двойной щелчок — править)")[s]
+
+    def data(self, idx, role=Qt.DisplayRole):
+        if role not in (Qt.DisplayRole, Qt.EditRole):
+            if role == Qt.ForegroundRole and idx.column() == 0:
+                from PySide6.QtGui import QColor
+                return QColor(110, 110, 110)
+            return None
+        r = idx.row()
+        if idx.column() == 0:
+            src = self.ch.tr_src or self.ch.text_paragraphs()
+            return src[r] if r < len(src) else ""
+        return self.ch.tr_paras[r]
+
+    def flags(self, idx):
+        f = Qt.ItemIsEnabled | Qt.ItemIsSelectable
+        return f | Qt.ItemIsEditable if idx.column() == 1 else f
+
+    def setData(self, idx, value, role=Qt.EditRole):
+        if idx.column() != 1 or role != Qt.EditRole:
+            return False
+        self.ch.tr_paras[idx.row()] = str(value).replace("\n", " ").strip()
+        self.dataChanged.emit(idx, idx)
+        self.edited.emit()
+        return True
+
+
 class WrapDelegate(QStyledItemDelegate):
     def createEditor(self, parent, option, index):
         ed = QPlainTextEdit(parent)
@@ -245,7 +292,8 @@ class EditorWindow(QMainWindow):
         self.tabs.addTab(self.view, "Фрагменты (двойной щелчок по тексту — правка, по времени — прослушать)")
         self.preview = QTextBrowser()
         self.tabs.addTab(self.preview, "Как будет в книге")
-        self.tabs.currentChanged.connect(lambda i: i == 1 and self._render_preview())
+        self.tabs.addTab(self._build_translation_tab(), "Перевод")
+        self.tabs.currentChanged.connect(self._tab_changed)
         split.addWidget(self.tabs)
         split.setSizes([260, 890])
         lay.addWidget(split, 1)
@@ -315,14 +363,78 @@ class EditorWindow(QMainWindow):
         self._show_cover()
         self._mark()
 
+    def _build_translation_tab(self):
+        from ..core.translate import ENGINE_NAME, LANG_NAME
+        self._lang_name, self._engine_name = LANG_NAME, ENGINE_NAME
+        w = QWidget()
+        v = QVBoxLayout(w)
+        self.tr_info = QLabel()
+        self.tr_info.setWordWrap(True)
+        v.addWidget(self.tr_info)
+        form = QFormLayout()
+        self.tr_book_title, self.tr_ch_title = QLineEdit(), QLineEdit()
+        self.tr_book_title.textEdited.connect(self._mark)
+        self.tr_ch_title.textEdited.connect(self._tr_ch_title_edited)
+        form.addRow("Название книги в переводе:", self.tr_book_title)
+        form.addRow("Название главы в переводе:", self.tr_ch_title)
+        v.addLayout(form)
+        self.tr_model = TranslationModel()
+        self.tr_model.edited.connect(self._mark)
+        self.tr_view = QTableView()
+        self.tr_view.setModel(self.tr_model)
+        self.tr_view.setItemDelegateForColumn(1, WrapDelegate(self.tr_view))
+        self.tr_view.setWordWrap(True)
+        self.tr_view.verticalHeader().setVisible(False)
+        hh = self.tr_view.horizontalHeader()
+        hh.setSectionResizeMode(0, QHeaderView.Stretch)
+        hh.setSectionResizeMode(1, QHeaderView.Stretch)
+        self.tr_view.setEditTriggers(QAbstractItemView.DoubleClicked | QAbstractItemView.EditKeyPressed)
+        v.addWidget(self.tr_view, 1)
+        return w
+
+    def _tr_ch_title_edited(self, text):
+        if 0 <= self.cur < len(self.book.chapters):
+            self.book.chapters[self.cur].tr_title = text.strip()
+            self._mark()
+
+    def _show_translation(self):
+        b = self.book
+        has = bool(b.tr_lang)
+        self.tr_book_title.setEnabled(has)
+        self.tr_ch_title.setEnabled(has)
+        self.tr_book_title.setText(b.tr_title if has else "")
+        if not (0 <= self.cur < len(b.chapters)):
+            return
+        ch = b.chapters[self.cur]
+        self.tr_ch_title.setText(ch.tr_title)
+        self.tr_model.set_chapter(ch)
+        self.tr_view.resizeRowsToContents()
+        if not has:
+            msg = ("Книга не переведена. Выберите язык в списке «Перевод на:» в главном окне и в меню книги "
+                   "(правая кнопка) нажмите «Перевести».")
+        else:
+            msg = (f"Перевод на {self._lang_name.get(b.tr_lang, b.tr_lang).lower()} — "
+                   f"{self._engine_name.get(b.tr_engine, b.tr_engine)}.")
+            if not ch.tr_paras:
+                msg += " Эта глава ещё не переведена."
+            elif not ch.translation_current():
+                msg += (" ⚠ Текст главы правили после перевода — перевод устарел. "
+                        "Чтобы перевести её заново, в меню книги нажмите «Перевести».")
+        self.tr_info.setText(msg)
+
+    def _tab_changed(self, i):
+        if i == 1:
+            self._render_preview()
+        elif i == 2:
+            self._show_translation()
+
     def show_chapter(self, row):
         self.stop_play()
         self.cur = row
         if 0 <= row < len(self.book.chapters):
             self.model.set_chapter(self.book.chapters[row])
             self.view.resizeRowsToContents()
-            if self.tabs.currentIndex() == 1:
-                self._render_preview()
+            self._tab_changed(self.tabs.currentIndex())
 
     def _chapter_renamed(self, item):
         r = self.chapters.row(item)
@@ -478,6 +590,8 @@ class EditorWindow(QMainWindow):
         b.narrator = self.e_narr.text().strip()
         b.year = self.e_year.text().strip()
         b.annotation = self.e_ann.toPlainText().strip()
+        if b.tr_lang:
+            b.tr_title = self.tr_book_title.text().strip() or b.tr_title
 
     def save(self):
         self._collect_meta()
