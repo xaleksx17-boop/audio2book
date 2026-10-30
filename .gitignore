@@ -1,0 +1,10 @@
+__pycache__/
+*.pyc
+build/
+dist/
+ffmpeg/
+wheels/
+cudapack/
+*.spec.bak
+.venv/
+.pytest_cache/

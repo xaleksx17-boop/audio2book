@@ -1,0 +1,105 @@
+name: Сборка для Windows x64
+
+on:
+  push:
+    branches: [main]
+    tags: ["v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Зависимости
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt pyinstaller pytest
+
+      - name: FFmpeg (LGPL, shared)
+        shell: pwsh
+        run: |
+          $url = "https://github.com/BtbN/FFmpeg-Builds/releases/download/latest/ffmpeg-master-latest-win64-lgpl-shared.zip"
+          Invoke-WebRequest $url -OutFile ffmpeg.zip
+          Expand-Archive ffmpeg.zip -DestinationPath ffmpeg_tmp
+          New-Item -ItemType Directory -Force ffmpeg | Out-Null
+          Get-ChildItem ffmpeg_tmp\*\bin\* | Copy-Item -Destination ffmpeg
+          Copy-Item (Get-ChildItem ffmpeg_tmp -Recurse -Filter LICENSE.txt | Select-Object -First 1).FullName ffmpeg\FFMPEG-LICENSE.txt
+          Remove-Item ffmpeg.zip, ffmpeg_tmp -Recurse -Force
+          Get-ChildItem ffmpeg
+
+      - name: Тесты
+        run: python -m pytest tests -q
+
+      - name: Версия
+        id: ver
+        shell: bash
+        run: |
+          if [[ "$GITHUB_REF" == refs/tags/v* ]]; then V="${GITHUB_REF#refs/tags/v}"; else V="1.0.${GITHUB_RUN_NUMBER}"; fi
+          echo "version=$V" >> "$GITHUB_OUTPUT"
+          sed -i "s/^APP_VERSION = .*/APP_VERSION = \"$V\"/" audio2book/core/settings.py
+
+      - name: PyInstaller
+        run: python -m PyInstaller packaging/audio2book.spec --noconfirm --distpath dist --workpath build
+
+      - name: Проверка exe (запускается и не падает)
+        shell: pwsh
+        run: |
+          $p = Start-Process dist\Audio2Book\Audio2Book.exe -PassThru
+          Start-Sleep 15
+          if ($p.HasExited) { Write-Error "Программа завершилась при запуске, код $($p.ExitCode)"; exit 1 }
+          Stop-Process $p -Force
+          Write-Host "Запуск OK"
+
+      - name: Установщик (Inno Setup)
+        shell: pwsh
+        run: |
+          if (-not (Test-Path "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe")) { choco install innosetup -y --no-progress }
+          & "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe" /DMyAppVersion=${{ steps.ver.outputs.version }} packaging\installer.iss
+          Compress-Archive dist\Audio2Book\* dist\Audio2Book-${{ steps.ver.outputs.version }}-portable.zip
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: Audio2Book-${{ steps.ver.outputs.version }}
+          path: |
+            dist/Audio2Book-Setup-*.exe
+            dist/Audio2Book-*-portable.zip
+
+      - name: Пакет для видеокарт NVIDIA (cuBLAS + cuDNN)
+        id: cuda
+        continue-on-error: true
+        shell: bash
+        run: |
+          pip download --only-binary=:all: --platform win_amd64 --python-version 3.12 --no-deps -d wheels \
+            "nvidia-cublas-cu12>=12.4,<13" "nvidia-cudnn-cu12>=9.1,<10" "nvidia-cuda-runtime-cu12>=12.4,<13"
+          mkdir -p cudapack/cuda
+          for w in wheels/*.whl; do python -m zipfile -e "$w" wheels/x; done
+          find wheels/x -iname "*.dll" -path "*bin*" -exec cp {} cudapack/cuda/ \;
+          ls -la cudapack/cuda
+          cd cudapack && 7z a -tzip -mx=5 ../dist/Audio2Book-CUDA-pack.zip cuda
+
+      - uses: actions/upload-artifact@v4
+        if: steps.cuda.outcome == 'success'
+        with:
+          name: Audio2Book-CUDA-pack
+          path: dist/Audio2Book-CUDA-pack.zip
+          compression-level: 0
+
+      - name: Релиз
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            dist/Audio2Book-Setup-*.exe
+            dist/Audio2Book-*-portable.zip
+            dist/Audio2Book-CUDA-pack.zip
+          fail_on_unmatched_files: false
