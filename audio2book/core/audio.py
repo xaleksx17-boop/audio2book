@@ -253,6 +253,63 @@ def iter_chunks(path: str, start: float, end: float, chunk_sec: float = 900.0,
         pos += cut / SAMPLE_RATE
 
 
+class SourcesMissing(AudioError):
+    """Аудиофайлы книги не найдены по сохранённым путям (папку переместили/переименовали)."""
+
+    def __init__(self, missing: List[str]):
+        self.missing = missing
+        super().__init__(f"Не найдены файлы книги ({len(missing)} шт.), например: {missing[0]}. "
+                         "Папку переместили или переименовали?")
+
+
+def relink_sources(chapters, folder: str) -> Tuple[int, List[str]]:
+    """Ищет пропавшие файлы глав в новой папке по имени файла.
+    Если одинаковых имён несколько (CD1/01.mp3, CD2/01.mp3) — по совпадению подпапок.
+    Возвращает (сколько глав перепривязано, какие файлы так и не нашлись)."""
+    by_name: Dict[str, List[str]] = {}
+    for f in collect_audio_files([folder]):
+        by_name.setdefault(os.path.basename(f).lower(), []).append(f)
+
+    def tail(p: str, n: int) -> List[str]:
+        return [x.lower() for x in re.split(r"[\\/]+", p)[-n:]]
+
+    fixed = 0
+    still: List[str] = []
+    remap: Dict[str, str] = {}
+    for ch in chapters:
+        if os.path.isfile(ch.source):
+            continue
+        if ch.source in remap:
+            ch.source = remap[ch.source]
+            fixed += 1
+            continue
+        cands = by_name.get(os.path.basename(ch.source.replace("\\", "/")).lower(), [])
+        best = None
+        if len(cands) == 1:
+            best = cands[0]
+        elif cands:
+            for n in (4, 3, 2):
+                m = [c for c in cands if tail(c, n) == tail(ch.source, n)]
+                if len(m) == 1:
+                    best = m[0]
+                    break
+        if best:
+            remap[ch.source] = best
+            ch.source = best
+            fixed += 1
+        elif ch.source not in still:
+            still.append(ch.source)
+    return fixed, still
+
+
+def missing_sources(chapters) -> List[str]:
+    out: List[str] = []
+    for ch in chapters:
+        if not ch.done and not os.path.isfile(ch.source) and ch.source not in out:
+            out.append(ch.source)
+    return out
+
+
 def fmt_duration(sec: float) -> str:
     sec = int(round(sec))
     h, rem = divmod(sec, 3600)

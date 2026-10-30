@@ -69,6 +69,7 @@ class MainWindow(QMainWindow):
         self.worker.partial.connect(self.on_partial)
         self.worker.job_info.connect(self.on_job_info)
         self.worker.finished.connect(self.on_finished)
+        self.worker.sources_missing.connect(self.on_sources_missing)
         self.thread.start()
 
         self.info_sig = _InfoSignals()
@@ -424,6 +425,42 @@ class MainWindow(QMainWindow):
                 QApplication_alert(self)
         elif status == STATUS_ERR and any(j.status == STATUS_WAIT for j in self.jobs):
             QTimer.singleShot(300, self.start)
+
+    def on_sources_missing(self, job_id, sample):
+        job = self._job(job_id)
+        if not job:
+            return
+        if QMessageBox.question(
+                self, "Файлы книги не найдены",
+                f"Не найден файл:\n{sample}\n\nПохоже, папку с книгой переместили или переименовали.\n"
+                "Указать, где она теперь? Распознанное ранее сохранится.") != QMessageBox.Yes:
+            return
+        start = os.path.dirname(sample)
+        while start and not os.path.isdir(start) and os.path.dirname(start) != start:
+            start = os.path.dirname(start)
+        folder = QFileDialog.getExistingDirectory(self, "Где теперь лежит аудиокнига?", start)
+        if not folder:
+            return
+        if job.project_path and os.path.isfile(job.project_path):
+            book = Book.load(job.project_path)
+            fixed, still = audio.relink_sources(book.chapters, folder)
+            if fixed:
+                book.save(job.project_path)
+            if still:
+                QMessageBox.warning(self, "Файлы книги не найдены",
+                                    f"В этой папке нет {len(still)} файл(ов) книги, например:\n"
+                                    f"{os.path.basename(still[0])}\n\nВыберите папку, где лежат все файлы.")
+                return
+            self.append_log(f"Файлы книги найдены в «{folder}» — перепривязано глав: {fixed}")
+        elif not audio.collect_audio_files([folder]):
+            QMessageBox.warning(self, "Файлы книги не найдены", "В выбранной папке нет аудиофайлов.")
+            return
+        job.inputs = [folder]
+        job.status, job.message = STATUS_WAIT, ""
+        self._refresh_row(job)
+        self.save_queue()
+        if not self.running:
+            self.start()
 
     def update_buttons(self):
         running = self.running is not None

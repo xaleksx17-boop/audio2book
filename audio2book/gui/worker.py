@@ -10,6 +10,7 @@ import traceback
 from PySide6.QtCore import QObject, Signal, Slot
 
 from ..core import pipeline
+from ..core.audio import SourcesMissing
 from ..core.pipeline import Callbacks, Job
 from ..core.settings import Settings
 from ..core.transcriber import Cancelled, Transcriber
@@ -32,6 +33,7 @@ class Worker(QObject):
     partial = Signal(str)                   # свежераспознанный фрагмент
     job_info = Signal(str, str, str, int, float, str)  # id, title, author, глав, длительность, project_path
     finished = Signal(str, str, str)        # job_id, статус, сообщение
+    sources_missing = Signal(str, str)      # job_id, пример пропавшего файла
 
     def __init__(self):
         super().__init__()
@@ -103,6 +105,10 @@ class Worker(QObject):
         except Cancelled:
             self.log.emit("Остановлено. Сделанное сохранено — «Старт» продолжит с этого места.")
             self.finished.emit(job.id, pipeline.STATUS_STOP, "")
+        except SourcesMissing as e:
+            self.log.emit("ОШИБКА: " + str(e))
+            self.finished.emit(job.id, pipeline.STATUS_ERR, "Файлы книги не найдены")
+            self.sources_missing.emit(job.id, e.missing[0])
         except Exception as e:
             self.log.emit("ОШИБКА: " + str(e))
             self.log.emit(traceback.format_exc(limit=4))

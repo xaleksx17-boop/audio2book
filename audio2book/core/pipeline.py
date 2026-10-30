@@ -83,6 +83,8 @@ def prepare_project(job: Job, settings: Settings, cb: Callbacks) -> Book:
         cb.log(f"Открыт проект «{book.title}» — продолжаю с места остановки")
         return book
     files = audio.collect_audio_files(job.inputs)
+    if not files and job.inputs and not any(os.path.exists(p) for p in job.inputs):
+        raise audio.SourcesMissing(list(job.inputs))
     if not files:
         raise audio.AudioError("В выбранных файлах/папках нет аудио")
     cb.log(f"Найдено файлов: {len(files)}. Читаю теги и главы…")
@@ -107,6 +109,9 @@ def prepare_project(job: Job, settings: Settings, cb: Callbacks) -> Book:
 
 
 def transcribe_book(job: Job, book: Book, settings: Settings, tr: Transcriber, cb: Callbacks) -> None:
+    missing = audio.missing_sources(book.chapters)
+    if missing:
+        raise audio.SourcesMissing(missing)
     total = max(book.duration, 1.0)
     t_start = time.monotonic()
     done_at_start = book.processed_seconds()
