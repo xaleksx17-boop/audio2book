@@ -8,7 +8,7 @@ from PySide6.QtWidgets import (QCheckBox, QComboBox, QDialog, QDialogButtonBox, 
                                QPushButton, QSpinBox, QVBoxLayout, QWidget)
 
 from ..core.settings import Settings
-from ..core.transcriber import MODELS, cuda_available
+from ..core.transcriber import MODELS, gpu_status
 
 LANGS = [("ru", "Русский"), ("en", "Английский"), ("uk", "Украинский"), ("be", "Белорусский"),
          ("kk", "Казахский"), ("de", "Немецкий"), ("fr", "Французский"), ("es", "Испанский"),
@@ -68,7 +68,9 @@ class SettingsDialog(QDialog):
         for k, t in (("auto", "Автоматически"), ("cuda", "Видеокарта NVIDIA (CUDA)"), ("cpu", "Процессор")):
             self.device.addItem(t, k)
         self.device.setCurrentIndex(max(0, self.device.findData(s.device)))
-        gpu = QLabel("✓ видеокарта найдена" if cuda_available() else "видеокарта NVIDIA не найдена")
+        ok, msg = gpu_status()
+        gpu = QLabel("✓ видеокарта найдена" if ok else "видеокарта не используется")
+        gpu.setToolTip(msg)
         gpu.setStyleSheet("color: gray")
         drow = QWidget()
         dh = QHBoxLayout(drow)

@@ -18,7 +18,7 @@ from ..core.pipeline import (STATUS_DONE, STATUS_ERR, STATUS_PAUSE, STATUS_RUN, 
                              STATUS_WAIT, Job)
 from ..core.project import PROJECT_EXT, Book
 from ..core.settings import APP_TITLE, APP_VERSION, FORMATS, Settings, config_dir
-from ..core.transcriber import MODELS, cuda_available
+from ..core.transcriber import MODELS, gpu_status
 from .worker import Worker
 
 COL_TITLE, COL_AUTHOR, COL_CH, COL_DUR, COL_STATUS, COL_PROG, COL_INFO = range(7)
@@ -77,10 +77,7 @@ class MainWindow(QMainWindow):
         self._build_ui()
         self.load_queue()
         self.update_buttons()
-        has_gpu = cuda_available()
-        self.statusBar().showMessage(
-            "Найдена видеокарта NVIDIA — распознавание будет быстрым" if has_gpu
-            else "Видеокарта NVIDIA не найдена — распознавание на процессоре (медленнее)")
+        self.statusBar().showMessage(gpu_status()[1])
 
     # ------------------------------------------------------------------ UI
     def _icon(self, sp):

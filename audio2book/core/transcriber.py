@@ -53,6 +53,43 @@ def cuda_available() -> bool:
         return False
 
 
+def best_cuda_compute_type() -> str:
+    """Лучший тип вычислений, который реально поддерживает видеокарта.
+    RTX 20xx и новее — float16; GTX 10xx (Pascal) float16 не умеют — для них int8."""
+    try:
+        import ctranslate2
+        sup = ctranslate2.get_supported_compute_types("cuda")
+    except Exception:
+        return "float16"
+    for t in ("float16", "int8_float16", "int8", "int8_float32", "float32"):
+        if t in sup:
+            return t
+    return "float32"
+
+
+def _nvidia_driver_present() -> bool:
+    if sys.platform != "win32":
+        return False
+    sysroot = os.environ.get("SystemRoot", r"C:\Windows")
+    return os.path.isfile(os.path.join(sysroot, "System32", "nvcuda.dll"))
+
+
+def gpu_status() -> Tuple[bool, str]:
+    """(видеокарта готова, понятное сообщение для строки состояния)."""
+    if cuda_available():
+        ct = best_cuda_compute_type()
+        return True, f"Видеокарта NVIDIA найдена — распознавание на ней ({ct})"
+    if _nvidia_driver_present():
+        base = os.path.dirname(sys.executable) if getattr(sys, "frozen", False) else \
+            os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+        if not os.path.isdir(os.path.join(base, "cuda")):
+            return False, ("Видеокарта NVIDIA есть, но нет CUDA-пакета — распознавание на процессоре. "
+                           f"Распакуйте Audio2Book-CUDA-pack.zip: папку cuda — в {base}")
+        return False, ("CUDA-пакет на месте, но видеокарта не запустилась — обновите драйвер NVIDIA. "
+                       "Пока распознавание на процессоре")
+    return False, "Видеокарта NVIDIA не найдена — распознавание на процессоре (медленнее)"
+
+
 class Cancelled(Exception):
     pass
 
@@ -78,14 +115,14 @@ class Transcriber:
             device = "cuda" if cuda_available() else "cpu"
         ct = self.compute_pref
         if ct == "auto":
-            ct = "float16" if device == "cuda" else "int8"
+            ct = best_cuda_compute_type() if device == "cuda" else "int8"
         return device, ct
 
     def load(self, device: Optional[str] = None, compute_type: Optional[str] = None) -> None:
         from faster_whisper import WhisperModel
         d, ct = self._choose()
         if device:
-            d, ct = device, compute_type or ("int8" if device == "cpu" else "float16")
+            d, ct = device, compute_type or ("int8" if device == "cpu" else best_cuda_compute_type())
         if self._model is not None and (d, ct) == (self.device, self.compute_type):
             return
         name = self.model_name
@@ -94,9 +131,22 @@ class Transcriber:
                  + ("" if local else " — при первом запуске она скачивается, это может занять время") + "…")
         if self.models_dir:
             os.makedirs(self.models_dir, exist_ok=True)
-        self._model = WhisperModel(name, device=d, compute_type=ct,
-                                   download_root=None if local else self.models_dir,
-                                   cpu_threads=self.cpu_threads)
+        try:
+            self._model = WhisperModel(name, device=d, compute_type=ct,
+                                       download_root=None if local else self.models_dir,
+                                       cpu_threads=self.cpu_threads)
+        except ValueError as e:
+            # «float16 не поддерживается этой видеокартой» и т.п. — берём то, что поддерживается
+            if d != "cuda" or "compute type" not in str(e).lower():
+                raise
+            fallback = best_cuda_compute_type()
+            if fallback == ct:
+                fallback = "float32"
+            self.log(f"Видеокарта не поддерживает {ct}, использую {fallback}")
+            ct = fallback
+            self._model = WhisperModel(name, device=d, compute_type=ct,
+                                       download_root=None if local else self.models_dir,
+                                       cpu_threads=self.cpu_threads)
         self.device, self.compute_type = d, ct
         self.log(f"Модель загружена: {d.upper()}, {ct}")
 
